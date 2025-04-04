@@ -3,17 +3,18 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <time.h>
+#include <unistd.h>
 
-#define MAX_FILENAME_SIZE 255;
-#define BLOCK_SIZE 4 * 1024;
-#define UNUSED_FLAG 0;
-#define USED_FLAG 1;
-#define BITMAP_BLOCK 1;
-#define FCB_BLOCKS_START 9;
-#define FCB_BLOCKS_COUNT 4;
-#define SUPERBLOCK_BLOCK 0;
-#define ROOT_DIR_START 5;
-#define ROOT_DIR_COUNT 4;
+#define MAX_FILENAME_SIZE 255
+#define BLOCK_SIZE 4 * 1024
+#define UNUSED_FLAG 0
+#define USED_FLAG 1
+#define BITMAP_BLOCK 1
+#define FCB_BLOCKS_START 9
+#define FCB_BLOCKS_COUNT 4
+#define SUPERBLOCK_BLOCK 0
+#define ROOT_DIR_START 5
+#define ROOT_DIR_COUNT 4
 
 uint32_t block_count;
 int vdisk_fd;
@@ -38,10 +39,10 @@ struct SuperBlock {
 
 struct DirectoryEntry {
   char filename[MAX_FILENAME_SIZE + 1];
-  int size;
-  int fcb_index;
+  uint32_t size;
+  uint32_t fcb_index;
   bool used;
-}
+};
 
 #pragma pack(pop)
 
@@ -59,7 +60,7 @@ void init_bitmap() {
     bitmap[i] = UNUSED_FLAG;
   }
 
-  write_block((*void)bitmap, BITMAP_BLOCK);
+  write_block((void *)bitmap, BITMAP_BLOCK);
 }
 
 void init_superblock(int total_blocks, int available_blocks, int total_fcbs) {
@@ -87,7 +88,7 @@ int init_FCB() {
       fcb->used = UNUSED_FLAG;
     }
 
-    write_block((void *)block, FCB_START_BLOCK + i);
+    write_block((void *)block, FCB_BLOCKS_START + i);
   }
   return total_fcbs;
 }
