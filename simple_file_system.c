@@ -46,6 +46,46 @@ struct DirectoryEntry {
 
 #pragma pack(pop)
 
+int create_format_vdisk(char *vdiskname, unsigned int m) {
+    char command[1000];
+    int size;
+    int num = 1;
+    int count;
+
+    size = num << m;
+    count = size / BLOCKSIZE;
+
+    printf("LOG(create_format_vdisk): (m: %d, size: %d bytes, blocks: %d)\n", m, size, count);
+
+    int header_count = SUPERBLOCK_COUNT + BITMAP_COUNT + FCB_COUNT + ROOT_DIR_COUNT;
+
+    if (count < header_count) {
+        printf("ERROR: Larger disk size required!\n");
+        return -1;
+    }
+
+    sprintf(command, "dd if=/dev/zero of=%s bs=%d count=%d", vdiskname, BLOCKSIZE, count);
+    system(command);
+
+    vdisk_fd = open(vdiskname, O_RDWR);
+    if (vdisk_fd < 0) {
+        perror("Failed to open virtual disk");
+        return -1;
+    }
+
+    int total_blocks = count;
+    int available_blocks = total_blocks - header_count;
+
+    init_bitmap();
+    int total_fcbs = init_FCB(); 
+    init_superblock(total_blocks, available_blocks, total_fcbs);
+    init_root_directory();
+
+    fsync(vdisk_fd); 
+    close(vdisk_fd);
+    return 0;
+}
+
 void write_block(void *block, uint32_t block_number) {
   uint32_t offset = block_number * BLOCK_SIZE;
   lseek(vdisk_fd, (off_t)offset, SEEK_SET);
@@ -108,4 +148,34 @@ void init_root_directory() {
   for (int i = 0; i < ROOT_DIR_COUNT; i++) {
     write_block((void *)block, ROOT_DIR_START + i);
   }
+}
+
+
+
+int sfs_mount(char *vdiskname) {
+    vdisk_fd = open(vdiskname, O_RDWR);
+    if (vdisk_fd < 0) {
+        perror("Failed to mount vdisk");
+        return -1;
+    }
+    printf("LOG(sfs_mount): Mounted %s successfully\n", vdiskname);
+
+    return 0;
+}
+int sfs_umount() {
+    if (vdisk_fd >= 0) {
+        fsync(vdisk_fd);  // Ensure all writes are flushed
+        close(vdisk_fd);
+        printf("LOG(sfs_umount): Unmounted successfully\n");
+        vdisk_fd = -1;
+    } else {
+        printf("LOG(sfs_umount): No disk mounted.\n");
+    }
+    return 0;
+}
+int main() {
+    create_format_vdisk("myvdisk", 20);
+    sfs_mount("myvdisk");
+    sfs_umount();
+    return 0;
 }
