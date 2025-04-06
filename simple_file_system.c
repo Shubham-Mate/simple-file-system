@@ -1,12 +1,15 @@
-#include <inttypes.h>
+#include "simple_file_system.h"
+#include <fcntl.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 #include <time.h>
 #include <unistd.h>
 
 #define MAX_FILENAME_SIZE 255
-#define BLOCK_SIZE 4 * 1024
+#define BLOCK_SIZE 4096
 #define UNUSED_FLAG 0
 #define USED_FLAG 1
 #define BITMAP_BLOCK 1
@@ -47,43 +50,45 @@ struct DirectoryEntry {
 #pragma pack(pop)
 
 int create_format_vdisk(char *vdiskname, unsigned int m) {
-    char command[1000];
-    int size;
-    int num = 1;
-    int count;
+  char command[1000];
+  int size;
+  int num = 1;
+  int count;
 
-    size = num << m;
-    count = size / BLOCKSIZE;
+  size = num << m;
+  count = size / BLOCK_SIZE;
 
-    printf("LOG(create_format_vdisk): (m: %d, size: %d bytes, blocks: %d)\n", m, size, count);
+  printf("LOG(create_format_vdisk): (m: %d, size: %d bytes, blocks: %d)\n", m,
+         size, count);
 
-    int header_count = SUPERBLOCK_COUNT + BITMAP_COUNT + FCB_COUNT + ROOT_DIR_COUNT;
+  int header_count = 1 + 1 + FCB_BLOCKS_COUNT + ROOT_DIR_COUNT;
 
-    if (count < header_count) {
-        printf("ERROR: Larger disk size required!\n");
-        return -1;
-    }
+  if (count < header_count) {
+    printf("ERROR: Larger disk size required!\n");
+    return -1;
+  }
 
-    sprintf(command, "dd if=/dev/zero of=%s bs=%d count=%d", vdiskname, BLOCKSIZE, count);
-    system(command);
+  sprintf(command, "dd if=/dev/zero of=%s bs=%d count=%d", vdiskname,
+          BLOCK_SIZE, count);
+  system(command);
 
-    vdisk_fd = open(vdiskname, O_RDWR);
-    if (vdisk_fd < 0) {
-        perror("Failed to open virtual disk");
-        return -1;
-    }
+  vdisk_fd = open(vdiskname, O_RDWR);
+  if (vdisk_fd < 0) {
+    perror("Failed to open virtual disk");
+    return -1;
+  }
 
-    int total_blocks = count;
-    int available_blocks = total_blocks - header_count;
+  int total_blocks = count;
+  int available_blocks = total_blocks - header_count;
 
-    init_bitmap();
-    int total_fcbs = init_FCB(); 
-    init_superblock(total_blocks, available_blocks, total_fcbs);
-    init_root_directory();
+  init_bitmap();
+  int total_fcbs = init_FCB();
+  init_superblock(total_blocks, available_blocks, total_fcbs);
+  init_root_directory();
 
-    fsync(vdisk_fd); 
-    close(vdisk_fd);
-    return 0;
+  fsync(vdisk_fd);
+  close(vdisk_fd);
+  return 0;
 }
 
 void write_block(void *block, uint32_t block_number) {
@@ -150,32 +155,30 @@ void init_root_directory() {
   }
 }
 
-
-
 int sfs_mount(char *vdiskname) {
-    vdisk_fd = open(vdiskname, O_RDWR);
-    if (vdisk_fd < 0) {
-        perror("Failed to mount vdisk");
-        return -1;
-    }
-    printf("LOG(sfs_mount): Mounted %s successfully\n", vdiskname);
+  vdisk_fd = open(vdiskname, O_RDWR);
+  if (vdisk_fd < 0) {
+    perror("Failed to mount vdisk");
+    return -1;
+  }
+  printf("LOG(sfs_mount): Mounted %s successfully\n", vdiskname);
 
-    return 0;
+  return 0;
 }
 int sfs_umount() {
-    if (vdisk_fd >= 0) {
-        fsync(vdisk_fd);  // Ensure all writes are flushed
-        close(vdisk_fd);
-        printf("LOG(sfs_umount): Unmounted successfully\n");
-        vdisk_fd = -1;
-    } else {
-        printf("LOG(sfs_umount): No disk mounted.\n");
-    }
-    return 0;
+  if (vdisk_fd >= 0) {
+    fsync(vdisk_fd); // Ensure all writes are flushed
+    close(vdisk_fd);
+    printf("LOG(sfs_umount): Unmounted successfully\n");
+    vdisk_fd = -1;
+  } else {
+    printf("LOG(sfs_umount): No disk mounted.\n");
+  }
+  return 0;
 }
-int main() {
-    create_format_vdisk("myvdisk", 20);
-    sfs_mount("myvdisk");
-    sfs_umount();
-    return 0;
-}
+/*int main() {
+  create_format_vdisk("myvdisk", 20);
+  sfs_mount("myvdisk");
+  sfs_umount();
+  return 0;
+}*/
