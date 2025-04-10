@@ -18,9 +18,8 @@
 #define SUPERBLOCK_BLOCK 0
 #define ROOT_DIR_START 5
 #define ROOT_DIR_COUNT 4
-
-uint32_t block_count;
-int vdisk_fd;
+#define MAX_FILES 128
+#define POINTERS_PER_BLK (BLOCK_SIZE / sizeof(uint32_t))
 
 #pragma pack(push, 1)
 
@@ -40,14 +39,39 @@ struct SuperBlock {
   uint32_t num_files;
 };
 
+struct IndexBlock {
+  uint32_t block_pointers[POINTERS_PER_BLK];
+};
+
 struct DirectoryEntry {
   char filename[MAX_FILENAME_SIZE + 1];
   uint32_t size;
   uint32_t fcb_index;
+  uint32_t index_block;
   bool used;
 };
 
+struct OpenFile {
+  struct DirectoryEntry dir_entry;
+  int open_mode;
+  int pointer;
+};
+
 #pragma pack(pop)
+
+// Utility functions
+int min(int a, int b) { return a > b ? b : a; }
+
+int dir_entry_size = sizeof(struct DirectoryEntry);
+int num_entries;
+uint32_t block_count;
+int vdisk_fd;
+struct SuperBlock superblock;
+int file_count;
+struct DirectoryEntry *directory;
+struct FCB *file_control_blocks;
+bool bitmap[BLOCK_SIZE];
+int num_fcbs;
 
 int create_format_vdisk(char *vdiskname, unsigned int m) {
   char command[1000];
@@ -98,6 +122,17 @@ void write_block(void *block, uint32_t block_number) {
   ssize_t bytes_written = write(vdisk_fd, block, BLOCK_SIZE);
 }
 
+void read_block(void *block, uint32_t block_number) {
+  // Reads the given block number and copies the content into block
+
+  uint32_t offset = block_number * BLOCK_SIZE;
+  lseek(vdisk_fd, (off_t)offset, SEEK_SET);
+
+  read(vdisk_fd, block, BLOCK_SIZE);
+}
+
+// Bitmap related functions
+
 void init_bitmap() {
   bool bitmap[BLOCK_SIZE];
 
@@ -107,6 +142,10 @@ void init_bitmap() {
 
   write_block((void *)bitmap, BITMAP_BLOCK);
 }
+
+void load_bitmap() { read_block(bitmap, BITMAP_BLOCK); }
+
+// Superblock related functions
 
 void init_superblock(int total_blocks, int available_blocks, int total_fcbs) {
   char block[BLOCK_SIZE] = {0};
@@ -119,10 +158,18 @@ void init_superblock(int total_blocks, int available_blocks, int total_fcbs) {
   write_block((void *)superblock, SUPERBLOCK_BLOCK);
 }
 
+void get_superblock(struct SuperBlock *superblock_buffer) {
+  // Fetches the Superblock and copies it into the buffer provided as argument
+  int block[BLOCK_SIZE] = {0};
+  read_block(block, SUPERBLOCK_BLOCK);
+
+  superblock_buffer = (struct SuperBlock *)block;
+}
+
 int init_FCB() {
   int fcb_size = sizeof(struct FCB);
   int total_fcbs = 0;
-  int num_fcbs = BLOCK_SIZE / fcb_size;
+  num_fcbs = BLOCK_SIZE / fcb_size;
   char block[BLOCK_SIZE] = {0};
 
   for (int i = 0; i < FCB_BLOCKS_COUNT; i++) {
@@ -138,9 +185,40 @@ int init_FCB() {
   return total_fcbs;
 }
 
+void load_FCBs() {
+  char block[BLOCK_SIZE] = {0};
+  int fcb_size = sizeof(struct FCB);
+  num_fcbs = BLOCK_SIZE / fcb_size;
+  file_control_blocks =
+      malloc(num_fcbs * FCB_BLOCKS_COUNT * sizeof(struct FCB));
+  for (int i = 0; i < FCB_BLOCKS_COUNT; i++) {
+    read_block(block, FCB_BLOCKS_START + i);
+    memcpy(&file_control_blocks[i * num_fcbs], block, num_fcbs * fcb_size);
+  }
+}
+
+// Index Block operations
+
+void set_index_block(struct IndexBlock *index_block, int block_number) {
+  char block[BLOCK_SIZE];
+  memcpy(block, index_block, sizeof(struct IndexBlock));
+
+  // 2. Zero out any remaining space in the block (for alignment/padding)
+  if (sizeof(struct IndexBlock) < BLOCK_SIZE) {
+    memset(block + sizeof(struct IndexBlock), 0,
+           BLOCK_SIZE - sizeof(struct IndexBlock));
+  }
+
+  write_block(block, block_number);
+}
+
+// Directory operations
+
 void init_root_directory() {
   int dir_entry_size = sizeof(struct DirectoryEntry);
-  int num_entries = BLOCK_SIZE / dir_entry_size;
+  num_entries = BLOCK_SIZE / dir_entry_size;
+  directory =
+      malloc(num_entries * ROOT_DIR_COUNT * sizeof(struct DirectoryEntry));
 
   char block[BLOCK_SIZE];
 
@@ -155,8 +233,27 @@ void init_root_directory() {
   }
 }
 
+void load_directory() {
+  char block[BLOCK_SIZE]; // buffer for reading
+  int dir_entry_size = sizeof(struct DirectoryEntry);
+  directory =
+      malloc(num_entries * ROOT_DIR_COUNT * sizeof(struct DirectoryEntry));
+
+  for (int i = 0; i < ROOT_DIR_COUNT; i++) {
+    read_block(block, ROOT_DIR_START + i);
+    memcpy(&directory[i * num_entries], block, num_entries * dir_entry_size);
+  }
+}
+
+// File system operations
+
 int sfs_mount(char *vdiskname) {
   vdisk_fd = open(vdiskname, O_RDWR);
+  get_superblock(&superblock);
+  load_directory();
+  load_bitmap();
+  load_FCBs();
+
   if (vdisk_fd < 0) {
     perror("Failed to mount vdisk");
     return -1;
@@ -165,6 +262,7 @@ int sfs_mount(char *vdiskname) {
 
   return 0;
 }
+
 int sfs_umount() {
   if (vdisk_fd >= 0) {
     fsync(vdisk_fd); // Ensure all writes are flushed
@@ -176,9 +274,77 @@ int sfs_umount() {
   }
   return 0;
 }
-/*int main() {
-  create_format_vdisk("myvdisk", 20);
-  sfs_mount("myvdisk");
-  sfs_umount();
+
+int sfs_create(char *filename) {
+  if (file_count == MAX_FILES) {
+    printf("Max number of files created! Cannot create more files");
+    return -1;
+  }
+
+  // Find first free directory entry + check if already a file of same name
+  // exists
+  int first_free_dir_entry = num_entries * ROOT_DIR_COUNT + 1;
+  for (int i = 0; i < num_entries * ROOT_DIR_COUNT; i++) {
+    if (directory[i].used == UNUSED_FLAG) {
+      first_free_dir_entry = min(first_free_dir_entry, i);
+    }
+
+    if (directory[i].used == USED_FLAG &&
+        strcmp(directory[i].filename, filename)) {
+      printf("Directory already has file of same name!\n");
+      return -1;
+    }
+  }
+
+  // Find first empty FCB
+  int first_free_fcb = num_fcbs * FCB_BLOCKS_COUNT + 1;
+  for (int i = 0; i < num_fcbs * FCB_BLOCKS_COUNT; i++) {
+    if (file_control_blocks[i].used == UNUSED_FLAG) {
+      first_free_fcb = min(first_free_fcb, i);
+      break;
+    }
+  }
+
+  if (first_free_fcb == num_fcbs * FCB_BLOCKS_COUNT + 1) {
+    printf("No free FCBs remaining\n");
+    return -1;
+  }
+
+  // Find first empty block in bitmap (for index block)
+  int first_free_block = BLOCK_SIZE + 1;
+  for (int i = 0; i < BLOCK_SIZE; i++) {
+    if (bitmap[i] == false) {
+      first_free_block = min(first_free_block, i);
+      bitmap[first_free_block] = true;
+      break;
+    }
+  }
+
+  if (first_free_block == BLOCK_SIZE + 1) {
+    printf("No free blocks remaining\n");
+    return -1;
+  }
+
+  first_free_block += FCB_BLOCKS_COUNT + FCB_BLOCKS_START;
+
+  // Write index block to first free block
+  struct IndexBlock index_block;
+  memset(index_block.block_pointers, 0xFF, sizeof(index_block.block_pointers));
+  set_index_block(&index_block, first_free_block);
+
+  // Set directory entry
+  directory[first_free_dir_entry].index_block = first_free_block;
+  directory[first_free_dir_entry].used = USED_FLAG;
+  directory[first_free_dir_entry].fcb_index = first_free_fcb;
+  strcpy(directory[first_free_dir_entry].filename, filename);
+  directory[first_free_dir_entry].size = 0;
+
+  // Set FCB
+  file_control_blocks[first_free_fcb].used = USED_FLAG;
+  strcpy(file_control_blocks[first_free_fcb].filename, filename);
+  file_control_blocks[first_free_fcb].size = 0;
+  file_control_blocks[first_free_fcb].created_at = time(NULL);
+  file_control_blocks[first_free_fcb].last_modified_at = time(NULL);
+
   return 0;
-}*/
+}
