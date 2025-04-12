@@ -20,6 +20,7 @@
 #define ROOT_DIR_COUNT 4
 #define MAX_FILES 128
 #define POINTERS_PER_BLK (BLOCK_SIZE / sizeof(uint32_t))
+#define INVALID_BLOCK_POINTER 0xFF
 
 #pragma pack(push, 1)
 
@@ -329,7 +330,8 @@ int sfs_create(char *filename) {
 
   // Write index block to first free block
   struct IndexBlock index_block;
-  memset(index_block.block_pointers, 0xFF, sizeof(index_block.block_pointers));
+  memset(index_block.block_pointers, INVALID_BLOCK_POINTER,
+         sizeof(index_block.block_pointers));
   set_index_block(&index_block, first_free_block);
 
   // Set directory entry
@@ -346,5 +348,48 @@ int sfs_create(char *filename) {
   file_control_blocks[first_free_fcb].created_at = time(NULL);
   file_control_blocks[first_free_fcb].last_modified_at = time(NULL);
 
+  file_count++;
+
   return 0;
+}
+
+int sfs_delete(char *filename) {
+
+  int dir_entry_index = num_entries * ROOT_DIR_COUNT + 1;
+  for (int i = 0; i < num_entries * ROOT_DIR_COUNT; i++) {
+    if (directory[i].used == USED_FLAG &&
+        strcmp(directory[i].filename, filename)) {
+      dir_entry_index = i;
+      break;
+    }
+  }
+
+  if (dir_entry_index == num_entries * ROOT_DIR_COUNT + 1) {
+    printf("Could not find given file\n");
+    return -1;
+  }
+
+  // Mark directory entry as unused
+  directory[dir_entry_index].used = UNUSED_FLAG;
+
+  // Mark file control block as ununsed
+  file_control_blocks[directory[dir_entry_index].fcb_index].used = UNUSED_FLAG;
+
+  // Mark all blocks in index block as unused
+  char block[BLOCK_SIZE];
+  read_block(block, directory[dir_entry_index].index_block);
+  struct IndexBlock *index_block = (struct IndexBlock *)block;
+
+  for (int i = 0; i < POINTERS_PER_BLK &&
+                  index_block->block_pointers[i] != INVALID_BLOCK_POINTER;
+       i++) {
+    bitmap[index_block->block_pointers[i]] = UNUSED_FLAG;
+  }
+
+  // Mark index block as unused
+  bitmap[directory[dir_entry_index].index_block] = UNUSED_FLAG;
+
+  file_count--;
+
+  return -1;
 }
