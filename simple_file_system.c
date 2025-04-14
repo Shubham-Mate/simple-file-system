@@ -21,6 +21,7 @@
 #define MAX_FILES 128
 #define POINTERS_PER_BLK (BLOCK_SIZE / sizeof(uint32_t))
 #define INVALID_BLOCK_POINTER 0xFF
+#define MAX_OPEN_FILES 16
 
 #pragma pack(push, 1)
 
@@ -53,9 +54,9 @@ struct DirectoryEntry {
 };
 
 struct OpenFile {
-  struct DirectoryEntry dir_entry;
+  struct DirectoryEntry *dir_entry_pointer;
   int open_mode;
-  int pointer;
+  int read_write_pointer;
 };
 
 #pragma pack(pop)
@@ -66,13 +67,18 @@ int min(int a, int b) { return a > b ? b : a; }
 int dir_entry_size = sizeof(struct DirectoryEntry);
 int num_entries;
 uint32_t block_count;
+int num_fcbs;
+
 int vdisk_fd;
+
 struct SuperBlock superblock;
-int file_count;
 struct DirectoryEntry *directory;
 struct FCB *file_control_blocks;
 bool bitmap[BLOCK_SIZE];
-int num_fcbs;
+
+int file_count = 0;
+int open_file_count = 0;
+struct OpenFile open_file_table[MAX_OPEN_FILES];
 
 int create_format_vdisk(char *vdiskname, unsigned int m) {
   char command[1000];
@@ -198,6 +204,13 @@ void load_FCBs() {
   }
 }
 
+void init_open_file_table() {
+  for (int i = 0; i < MAX_OPEN_FILES; i++) {
+    open_file_table[i].dir_entry_pointer = NULL;
+    open_file_table[i].read_write_pointer = 0;
+  }
+}
+
 // Index Block operations
 
 void set_index_block(struct IndexBlock *index_block, int block_number) {
@@ -254,6 +267,7 @@ int sfs_mount(char *vdiskname) {
   load_directory();
   load_bitmap();
   load_FCBs();
+  init_open_file_table();
 
   if (vdisk_fd < 0) {
     perror("Failed to mount vdisk");
@@ -392,4 +406,68 @@ int sfs_delete(char *filename) {
   file_count--;
 
   return -1;
+}
+
+int sfs_open(char *filename, int mode) {
+  if (open_file_count >= MAX_OPEN_FILES) {
+    printf("Maximum number of files already opened (%d)\n", open_file_count);
+    return -1;
+  }
+
+  for (int i = 0; i < MAX_OPEN_FILES; i++) {
+    if (open_file_table[i].dir_entry_pointer != NULL &&
+        strcmp(open_file_table[i].dir_entry_pointer->filename, filename)) {
+      printf("This file is already opened somewhere!\n");
+      return -1;
+    }
+  }
+
+  // Find first free entry in open file table (this will also be our file
+  // descriptor)
+  int fd = -1;
+  for (int i = 0; i < MAX_OPEN_FILES; i++) {
+    if (open_file_table[i].dir_entry_pointer == NULL) {
+      fd = i;
+      break;
+    }
+  }
+
+  // Find the directory entry of the file
+  int dir_entry_index = num_entries * ROOT_DIR_COUNT + 1;
+  for (int i = 0; i < num_entries * ROOT_DIR_COUNT; i++) {
+    if (directory[i].used == USED_FLAG &&
+        strcmp(directory[i].filename, filename)) {
+      dir_entry_index = i;
+      break;
+    }
+  }
+
+  if (dir_entry_index == num_entries * ROOT_DIR_COUNT + 1) {
+    printf("Could not find given file\n");
+    return -1;
+  }
+
+  open_file_table[fd].open_mode = mode;
+  open_file_table[fd].read_write_pointer = 0;
+  open_file_table[fd].dir_entry_pointer = &directory[dir_entry_index];
+  open_file_count++;
+
+  return fd;
+}
+
+int sfs_close(int fd) {
+  if (fd >= MAX_OPEN_FILES) {
+    printf("File descriptor out of range");
+    return -1;
+  }
+
+  if (open_file_table[fd].dir_entry_pointer == NULL) {
+    printf("The file was not open\n");
+    return -1;
+  }
+
+  open_file_table[fd].dir_entry_pointer = NULL;
+  open_file_count--;
+
+  return 0;
 }
