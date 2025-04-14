@@ -1,6 +1,7 @@
 #include "simple_file_system.h"
 #include <fcntl.h>
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -22,6 +23,13 @@
 #define POINTERS_PER_BLK (BLOCK_SIZE / sizeof(uint32_t))
 #define INVALID_BLOCK_POINTER 0xFF
 #define MAX_OPEN_FILES 16
+
+#define SFS_SEEK_SET 0
+#define SFS_SEEK_CUR 1
+#define SFS_SEEK_END 2
+
+#define READ_MODE 0
+#define WRITE_MODE 1
 
 #pragma pack(push, 1)
 
@@ -217,7 +225,7 @@ void set_index_block(struct IndexBlock *index_block, int block_number) {
   char block[BLOCK_SIZE];
   memcpy(block, index_block, sizeof(struct IndexBlock));
 
-  // 2. Zero out any remaining space in the block (for alignment/padding)
+  // Zero out any remaining space in the block (for alignment/padding)
   if (sizeof(struct IndexBlock) < BLOCK_SIZE) {
     memset(block + sizeof(struct IndexBlock), 0,
            BLOCK_SIZE - sizeof(struct IndexBlock));
@@ -226,6 +234,11 @@ void set_index_block(struct IndexBlock *index_block, int block_number) {
   write_block(block, block_number);
 }
 
+void get_index_block(struct IndexBlock *index_block, int block_number) {
+  char block[BLOCK_SIZE];
+  read_block(block, block_number);
+  memcpy(index_block, block, sizeof(struct IndexBlock));
+}
 // Directory operations
 
 void init_root_directory() {
@@ -468,6 +481,106 @@ int sfs_close(int fd) {
 
   open_file_table[fd].dir_entry_pointer = NULL;
   open_file_count--;
+
+  return 0;
+}
+
+int sfs_seek(int fd, int offset, int whence) {
+  int read_write_pointer_copy = open_file_table[fd].read_write_pointer;
+  switch (whence) {
+  case SEEK_SET:
+    open_file_table[fd].read_write_pointer = offset;
+    break;
+
+  case SEEK_CUR:
+    open_file_table[fd].read_write_pointer += offset;
+    break;
+
+  case SEEK_END:
+    open_file_table[fd].read_write_pointer =
+        file_control_blocks[open_file_table[fd].dir_entry_pointer->fcb_index]
+            .size +
+        offset;
+    break;
+  }
+
+  if (open_file_table[fd].read_write_pointer >
+      file_control_blocks[open_file_table[fd].dir_entry_pointer->fcb_index]
+          .size) {
+    printf("Read-Write pointer going out of bounds\n");
+    open_file_table[fd].read_write_pointer = read_write_pointer_copy;
+    return -1;
+  }
+
+  return 0;
+}
+
+int sfs_read(int fd, void *buffer, int size) {
+
+  if (fd >= MAX_OPEN_FILES || open_file_table[fd].dir_entry_pointer == NULL) {
+    printf(
+        "ERROR: The given file descriptor does not belong to an open file\n");
+    return -1;
+  }
+
+  if (open_file_table[fd].open_mode != READ_MODE) {
+    printf("ERROR: The given file is not opened in read mode\n");
+    return -1;
+  }
+
+  int file_size =
+      file_control_blocks[open_file_table[fd].dir_entry_pointer->fcb_index]
+          .size;
+  int read_write_pointer = open_file_table[fd].read_write_pointer;
+  if (read_write_pointer + size > file_size) {
+    printf("ERROR: Not enough bytes to read in file\n");
+    return -1;
+  }
+
+  if (size == 0) {
+    return 0;
+  }
+
+  int start_block = read_write_pointer / BLOCK_SIZE;
+  int start_block_offset = read_write_pointer % BLOCK_SIZE;
+  int end_block = (read_write_pointer + size) / BLOCK_SIZE;
+  int end_block_offset = (read_write_pointer + size) % BLOCK_SIZE;
+
+  // Fetch the index block of the file
+  struct IndexBlock index_block;
+  get_index_block(&index_block,
+                  open_file_table[fd].dir_entry_pointer->index_block);
+
+  char block[BLOCK_SIZE];
+  size_t copy_size;
+  if (start_block == end_block) {
+    read_block(block, index_block.block_pointers[start_block]);
+
+    copy_size = end_block_offset - start_block_offset;
+    memcpy(buffer, block + start_block_offset, copy_size);
+    return 0;
+  }
+
+  // Copy from (starting pointer offset to end of starting block)
+  read_block(block, index_block.block_pointers[start_block]);
+  copy_size = BLOCK_SIZE - start_block_offset;
+  memcpy(buffer, block + start_block_offset, copy_size);
+
+  // Copy from first block after the starting offset till last complete end
+  // block
+  for (int i = start_block + 1; i < end_block; i++) {
+    read_block(buffer + start_block_offset + (i - start_block) * BLOCK_SIZE,
+               index_block.block_pointers[i]);
+  }
+
+  // Copy from last complete block to end pointer offset
+  read_block(block, index_block.block_pointers[end_block]);
+  copy_size = end_block_offset;
+  memcpy(buffer + start_block_offset + (end_block - start_block) * BLOCK_SIZE,
+         block, copy_size);
+
+  open_file_table[fd].read_write_pointer =
+      end_block * BLOCK_SIZE + end_block_offset;
 
   return 0;
 }
