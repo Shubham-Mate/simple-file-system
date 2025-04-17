@@ -160,6 +160,16 @@ void init_bitmap() {
 
 void load_bitmap() { read_block(bitmap, BITMAP_BLOCK); }
 
+int find_empty_block() {
+  for (int i = 0; i < BLOCK_SIZE; i++) {
+    if (bitmap[i] == UNUSED_FLAG) {
+      bitmap[i] = USED_FLAG;
+      return i;
+    }
+  }
+  return -1;
+}
+
 // Superblock related functions
 
 void init_superblock(int total_blocks, int available_blocks, int total_fcbs) {
@@ -580,6 +590,122 @@ int sfs_read(int fd, void *buffer, int size) {
          block, copy_size);
 
   open_file_table[fd].read_write_pointer =
+      end_block * BLOCK_SIZE + end_block_offset;
+
+  return 0;
+}
+
+int sfs_write(int fd, void *buffer, int size) {
+
+  if (fd >= MAX_OPEN_FILES || open_file_table[fd].dir_entry_pointer == NULL) {
+    printf(
+        "ERROR: The given file descriptor does not belong to an open file\n");
+    return -1;
+  }
+
+  if (open_file_table[fd].open_mode != WRITE_MODE) {
+    printf("ERROR: The given file is not opened in write mode\n");
+    return -1;
+  }
+
+  int file_size =
+      file_control_blocks[open_file_table[fd].dir_entry_pointer->fcb_index]
+          .size;
+  int read_write_pointer = open_file_table[fd].read_write_pointer;
+
+  int start_block = read_write_pointer / BLOCK_SIZE;
+  int start_block_offset = read_write_pointer % BLOCK_SIZE;
+  int end_block = (read_write_pointer + size) / BLOCK_SIZE;
+  int end_block_offset = (read_write_pointer + size) % BLOCK_SIZE;
+
+  if (size == 0) {
+    return 0;
+  }
+
+  // Fetch the index block of the file
+  struct IndexBlock index_block;
+  get_index_block(&index_block,
+                  open_file_table[fd].dir_entry_pointer->index_block);
+
+  char block[BLOCK_SIZE];
+  size_t copy_size;
+
+  // If file is empty, find an empty block and assign it to the file
+  if (index_block.block_pointers[start_block] == INVALID_BLOCK_POINTER) {
+    int empty_block_index = find_empty_block();
+    if (empty_block_index == -1) {
+      printf("ERROR: Couldn't find a free block to assign to file\n");
+      return -1;
+    }
+    index_block.block_pointers[start_block] = empty_block_index;
+  }
+
+  // If the start pointer and end pointer in same block
+  if (start_block == end_block) {
+    read_block(block, index_block.block_pointers[start_block]);
+
+    copy_size = end_block_offset - start_block_offset;
+    memcpy(block + start_block_offset, buffer, copy_size);
+    write_block(block, index_block.block_pointers[start_block]);
+
+    return 0;
+  }
+
+  // Write from start pointer offset to end of start pointer block
+  read_block(block, index_block.block_pointers[start_block]);
+
+  copy_size = BLOCK_SIZE - start_block_offset;
+  memcpy(block + start_block_offset, buffer, copy_size);
+  write_block(block, index_block.block_pointers[start_block]);
+
+  // Write from first block after the starting offset till last complete end
+  // block
+  for (int i = start_block + 1; i < end_block; i++) {
+    if (index_block.block_pointers[i] == INVALID_BLOCK_POINTER) {
+      int empty_block_index = find_empty_block();
+      if (empty_block_index == -1) {
+        printf("ERROR: Couldn't find a free block to assign to file\n");
+        open_file_table[fd].read_write_pointer +=
+            start_block_offset + (i - 1 - start_block) * BLOCK_SIZE;
+        return -1;
+      }
+      index_block.block_pointers[i] = empty_block_index;
+    }
+    write_block(buffer + start_block_offset + (i - start_block) * BLOCK_SIZE,
+                index_block.block_pointers[i]);
+  }
+
+  // Write till end block offset
+
+  if (index_block.block_pointers[end_block] == INVALID_BLOCK_POINTER) {
+    int empty_block_index = find_empty_block();
+    if (empty_block_index == -1) {
+      printf("ERROR: Couldn't find a free block to assign to file\n");
+      open_file_table[fd].read_write_pointer +=
+          start_block_offset + (end_block - 1 - start_block) * BLOCK_SIZE;
+      return -1;
+    }
+    index_block.block_pointers[end_block] = empty_block_index;
+  }
+
+  copy_size = end_block_offset;
+  memcpy(block,
+         buffer + start_block_offset + (end_block - start_block) * BLOCK_SIZE,
+         copy_size);
+
+  // Free the remaining blocks
+  for (int i = end_block + 1; i < POINTERS_PER_BLK; i++) {
+    if (index_block.block_pointers[i] != INVALID_BLOCK_POINTER) {
+      bitmap[index_block.block_pointers[i]] = UNUSED_FLAG;
+    }
+    index_block.block_pointers[i] = INVALID_BLOCK_POINTER;
+  }
+
+  open_file_table[fd].read_write_pointer =
+      end_block * BLOCK_SIZE + end_block_offset;
+  file_control_blocks[open_file_table[fd].dir_entry_pointer->fcb_index].size =
+      end_block * BLOCK_SIZE + end_block_offset;
+  open_file_table[fd].dir_entry_pointer->size =
       end_block * BLOCK_SIZE + end_block_offset;
 
   return 0;

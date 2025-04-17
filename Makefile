@@ -13,3 +13,7 @@ create_vdisk: create_vdisk.c libsimplefs.a
 clean:
 	@echo "Removing all files except source files..."
 	@rm create_vdisk libsimplefs.a
+
+
+test: test.c
+	gcc -Wall -o test  test.c   -L. -lsimplefs
