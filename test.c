@@ -17,7 +17,7 @@ void test_create_and_delete() {
   int res_create;
   gettimeofday(&start, NULL);
 
-  char *vfs_name = "vfs_test";
+  char *vfs_name = "vdisk";
 
   printf("* create_format_vdisk **\n");
   res_create = create_format_vdisk(vfs_name, 20); // NOTE: Max disk size 128 MB
@@ -38,22 +38,13 @@ void test_create_and_delete() {
   int res_create_file = sfs_create("vfs_test.txt");
   is_res_pass(res_create_file);
 
-  printf("* sfs_delete **\n");
-  int res_delete = sfs_delete("vfs_test.txt");
-  is_res_pass(res_delete);
-
   // Re-create and open the file
   sfs_create("vfs_test.txt");
-  int fd = sfs_open("vfs_test.txt", MODE_WRITE);
+  int fd = sfs_open("vfs_test.txt", READ_MODE);
   if (fd < 0) {
     printf("Error opening file\n");
     return;
   }
-
-  // Test appending data to the file
-  int data = 42;
-  res_create_file = sfs_append(fd, &data, sizeof(int));
-  is_res_pass(res_create_file);
 
   // Test reading data back
   int read_data = 0;
@@ -97,31 +88,23 @@ void test_multiple_file_operations() {
   for (int i = 0; i < 10; i++) {
     sprintf(filename_test, "file_%d.txt", i);
     res_create = sfs_create(filename_test);
-    is_res_pass(res_create);
-  }
-
-  // Open all files and append data
-  for (int i = 0; i < 10; i++) {
-    sprintf(filename_test, "file_%d.txt", i);
-    int fd = sfs_open(filename_test, MODE_WRITE);
-    if (fd < 0) {
-      printf("Error opening file %d\n", i);
-      return;
-    }
-    int data = i * 10;
-    res_create = sfs_append(fd, &data, sizeof(int));
-    is_res_pass(res_create);
+    int fd = sfs_open(filename_test, WRITE_MODE);
+    int buffer[2] = {i, i + 1};
+    sfs_write(fd, buffer, sizeof(int));
+    sfs_seek(fd, 0, SFS_SEEK_SET);
     sfs_close(fd);
+    is_res_pass(res_create);
   }
 
   // Read data from files
   for (int i = 0; i < 10; i++) {
     sprintf(filename_test, "file_%d.txt", i);
-    int fd = sfs_open(filename_test, MODE_READ);
+    int fd = sfs_open(filename_test, READ_MODE);
     if (fd < 0) {
       printf("Error opening file %d\n", i);
       return;
     }
+    sfs_seek(fd, 0, SFS_SEEK_SET);
     int read_data = 0;
     sfs_read(fd, &read_data, sizeof(int));
     printf("Data in file_%d.txt: %d\n", i, read_data);

@@ -31,44 +31,6 @@
 #define READ_MODE 0
 #define WRITE_MODE 1
 
-#pragma pack(push, 1)
-
-struct FCB {
-  char filename[MAX_FILENAME_SIZE + 1];
-  char owner[MAX_FILENAME_SIZE + 1];
-  uint32_t size;
-  time_t created_at;
-  time_t last_modified_at;
-  bool used;
-};
-
-struct SuperBlock {
-  uint32_t num_blocks;
-  uint32_t num_free_blocks;
-  uint32_t num_free_fcbs;
-  uint32_t num_files;
-};
-
-struct IndexBlock {
-  uint32_t block_pointers[POINTERS_PER_BLK];
-};
-
-struct DirectoryEntry {
-  char filename[MAX_FILENAME_SIZE + 1];
-  uint32_t size;
-  uint32_t fcb_index;
-  uint32_t index_block;
-  bool used;
-};
-
-struct OpenFile {
-  struct DirectoryEntry *dir_entry_pointer;
-  int open_mode;
-  int read_write_pointer;
-};
-
-#pragma pack(pop)
-
 // Utility functions
 int min(int a, int b) { return a > b ? b : a; }
 
@@ -149,7 +111,6 @@ void read_block(void *block, uint32_t block_number) {
 // Bitmap related functions
 
 void init_bitmap() {
-  bool bitmap[BLOCK_SIZE];
 
   for (int i = 0; i < BLOCK_SIZE; i++) {
     bitmap[i] = UNUSED_FLAG;
@@ -184,11 +145,9 @@ void init_superblock(int total_blocks, int available_blocks, int total_fcbs) {
 }
 
 void get_superblock(struct SuperBlock *superblock_buffer) {
-  // Fetches the Superblock and copies it into the buffer provided as argument
-  int block[BLOCK_SIZE] = {0};
+  char block[BLOCK_SIZE] = {0};
   read_block(block, SUPERBLOCK_BLOCK);
-
-  superblock_buffer = (struct SuperBlock *)block;
+  memcpy(superblock_buffer, block, sizeof(struct SuperBlock));
 }
 
 int init_FCB() {
@@ -328,7 +287,7 @@ int sfs_create(char *filename) {
     }
 
     if (directory[i].used == USED_FLAG &&
-        strcmp(directory[i].filename, filename)) {
+        strcmp(directory[i].filename, filename) == 0) {
       printf("Directory already has file of same name!\n");
       return -1;
     }
@@ -395,7 +354,7 @@ int sfs_delete(char *filename) {
   int dir_entry_index = num_entries * ROOT_DIR_COUNT + 1;
   for (int i = 0; i < num_entries * ROOT_DIR_COUNT; i++) {
     if (directory[i].used == USED_FLAG &&
-        strcmp(directory[i].filename, filename)) {
+        strcmp(directory[i].filename, filename) == 0) {
       dir_entry_index = i;
       break;
     }
@@ -408,9 +367,11 @@ int sfs_delete(char *filename) {
 
   // Mark directory entry as unused
   directory[dir_entry_index].used = UNUSED_FLAG;
+  printf("Set dir entry to unused\n");
 
   // Mark file control block as ununsed
   file_control_blocks[directory[dir_entry_index].fcb_index].used = UNUSED_FLAG;
+  printf("Set FCB to unused\n");
 
   // Mark all blocks in index block as unused
   char block[BLOCK_SIZE];
@@ -422,13 +383,15 @@ int sfs_delete(char *filename) {
        i++) {
     bitmap[index_block->block_pointers[i]] = UNUSED_FLAG;
   }
+  printf("Set bitmap blocks to unused\n");
 
   // Mark index block as unused
   bitmap[directory[dir_entry_index].index_block] = UNUSED_FLAG;
+  printf("Set bitmap index block to unused\n");
 
   file_count--;
 
-  return -1;
+  return 0;
 }
 
 int sfs_open(char *filename, int mode) {
@@ -439,7 +402,7 @@ int sfs_open(char *filename, int mode) {
 
   for (int i = 0; i < MAX_OPEN_FILES; i++) {
     if (open_file_table[i].dir_entry_pointer != NULL &&
-        strcmp(open_file_table[i].dir_entry_pointer->filename, filename)) {
+        strcmp(open_file_table[i].dir_entry_pointer->filename, filename) == 0) {
       printf("This file is already opened somewhere!\n");
       return -1;
     }
@@ -459,7 +422,7 @@ int sfs_open(char *filename, int mode) {
   int dir_entry_index = num_entries * ROOT_DIR_COUNT + 1;
   for (int i = 0; i < num_entries * ROOT_DIR_COUNT; i++) {
     if (directory[i].used == USED_FLAG &&
-        strcmp(directory[i].filename, filename)) {
+        strcmp(directory[i].filename, filename) == 0) {
       dir_entry_index = i;
       break;
     }
@@ -537,10 +500,11 @@ int sfs_read(int fd, void *buffer, int size) {
     printf("ERROR: The given file is not opened in read mode\n");
     return -1;
   }
-
   int file_size =
       file_control_blocks[open_file_table[fd].dir_entry_pointer->fcb_index]
           .size;
+  printf("File size: %d\n", file_size);
+
   int read_write_pointer = open_file_table[fd].read_write_pointer;
   if (read_write_pointer + size > file_size) {
     printf("ERROR: Not enough bytes to read in file\n");
@@ -648,6 +612,24 @@ int sfs_write(int fd, void *buffer, int size) {
     memcpy(block + start_block_offset, buffer, copy_size);
     write_block(block, index_block.block_pointers[start_block]);
 
+    uint32_t new_size = read_write_pointer + size;
+
+    // Update all size references
+    open_file_table[fd].read_write_pointer = new_size;
+
+    // Get FCB reference
+    struct FCB *fcb =
+        &file_control_blocks[open_file_table[fd].dir_entry_pointer->fcb_index];
+
+    // Update metadata
+    fcb->size = new_size;
+    fcb->last_modified_at = time(NULL);
+    open_file_table[fd].dir_entry_pointer->size = new_size;
+
+    // Persist the index block changes
+    set_index_block(&index_block,
+                    open_file_table[fd].dir_entry_pointer->index_block);
+
     return 0;
   }
 
@@ -701,12 +683,161 @@ int sfs_write(int fd, void *buffer, int size) {
     index_block.block_pointers[i] = INVALID_BLOCK_POINTER;
   }
 
-  open_file_table[fd].read_write_pointer =
-      end_block * BLOCK_SIZE + end_block_offset;
-  file_control_blocks[open_file_table[fd].dir_entry_pointer->fcb_index].size =
-      end_block * BLOCK_SIZE + end_block_offset;
-  open_file_table[fd].dir_entry_pointer->size =
-      end_block * BLOCK_SIZE + end_block_offset;
+  // At the end of sfs_write():
+  uint32_t new_size = read_write_pointer + size;
+
+  // Update all size references
+  open_file_table[fd].read_write_pointer = new_size;
+
+  // Get FCB reference
+  struct FCB *fcb =
+      &file_control_blocks[open_file_table[fd].dir_entry_pointer->fcb_index];
+
+  // Update metadata
+  fcb->size = new_size;
+  fcb->last_modified_at = time(NULL);
+  open_file_table[fd].dir_entry_pointer->size = new_size;
+
+  // Persist the index block changes
+  set_index_block(&index_block,
+                  open_file_table[fd].dir_entry_pointer->index_block);
+
+  return 0;
+}
+
+int sfs_append(char *filename, void *data, size_t size) {
+  // Find the directory entry for the file
+  int dir_entry_index = -1;
+  for (int i = 0; i < num_entries * ROOT_DIR_COUNT; i++) {
+    if (directory[i].used == USED_FLAG &&
+        strcmp(directory[i].filename, filename) == 0) {
+      dir_entry_index = i;
+      break;
+    }
+  }
+
+  if (dir_entry_index == -1) {
+    printf("File not found\n");
+    return -1;
+  }
+
+  // Get the corresponding FCB for the file
+  struct FCB *fcb = &file_control_blocks[directory[dir_entry_index].fcb_index];
+  uint32_t current_size = fcb->size;
+
+  // If the file is empty, initialize index block
+  if (current_size == 0) {
+    struct IndexBlock new_index_block;
+    memset(new_index_block.block_pointers, INVALID_BLOCK_POINTER,
+           sizeof(new_index_block.block_pointers));
+    set_index_block(&new_index_block, directory[dir_entry_index].index_block);
+  }
+
+  // Find the last block in the file's index block (or first available index
+  // block)
+  struct IndexBlock index_block;
+  read_block(&index_block, directory[dir_entry_index].index_block);
+
+  uint32_t last_block = INVALID_BLOCK_POINTER;
+  for (int i = 0; i < POINTERS_PER_BLK; i++) {
+    if (index_block.block_pointers[i] != INVALID_BLOCK_POINTER) {
+      last_block = index_block.block_pointers[i];
+    } else {
+      break;
+    }
+  }
+
+  // If the file is too short, allocate a new block
+  if (last_block == INVALID_BLOCK_POINTER) {
+    // Find a free block from the bitmap
+    int new_block = -1;
+    for (int i = 0; i < BLOCK_SIZE; i++) {
+      if (bitmap[i] == UNUSED_FLAG) {
+        new_block = i;
+        bitmap[new_block] = true;
+        break;
+      }
+    }
+
+    if (new_block == -1) {
+      printf("No free blocks available\n");
+      return -1;
+    }
+
+    // Update the index block with the new block pointer
+    for (int i = 0; i < POINTERS_PER_BLK; i++) {
+      if (index_block.block_pointers[i] == INVALID_BLOCK_POINTER) {
+        index_block.block_pointers[i] = new_block;
+        set_index_block(&index_block, directory[dir_entry_index].index_block);
+        last_block = new_block;
+        break;
+      }
+    }
+  }
+
+  // Write the new data to the last block of the file
+  char block[BLOCK_SIZE];
+  read_block(block, last_block);
+  uint32_t offset_in_block = current_size % BLOCK_SIZE;
+
+  // Check if we have enough space in the current block
+  if (offset_in_block + size <= BLOCK_SIZE) {
+    memcpy(block + offset_in_block, data, size);
+    write_block(block, last_block);
+  } else {
+    // If not enough space, we need to split the data across multiple blocks
+    size_t remaining_size = size;
+    char *data_ptr = (char *)data;
+
+    // Write part of the data into the current block
+    memcpy(block + offset_in_block, data_ptr, BLOCK_SIZE - offset_in_block);
+    write_block(block, last_block);
+
+    remaining_size -= (BLOCK_SIZE - offset_in_block);
+    data_ptr += (BLOCK_SIZE - offset_in_block);
+
+    // Allocate new blocks and continue writing
+    while (remaining_size > 0) {
+      int new_block = -1;
+      for (int i = 0; i < BLOCK_SIZE; i++) {
+        if (bitmap[i] == UNUSED_FLAG) {
+          new_block = i;
+          bitmap[new_block] = true;
+          break;
+        }
+      }
+
+      if (new_block == -1) {
+        printf("No free blocks available\n");
+        return -1;
+      }
+
+      read_block(block, new_block);
+      size_t chunk_size =
+          remaining_size > BLOCK_SIZE ? BLOCK_SIZE : remaining_size;
+      memcpy(block, data_ptr, chunk_size);
+      write_block(block, new_block);
+
+      remaining_size -= chunk_size;
+      data_ptr += chunk_size;
+
+      // Update index block with the new block pointer
+      for (int i = 0; i < POINTERS_PER_BLK; i++) {
+        if (index_block.block_pointers[i] == INVALID_BLOCK_POINTER) {
+          index_block.block_pointers[i] = new_block;
+          set_index_block(&index_block, directory[dir_entry_index].index_block);
+          break;
+        }
+      }
+    }
+  }
+
+  // Update the file size in the FCB
+  fcb->size += size;
+  fcb->last_modified_at = time(NULL);
+
+  // Update the directory entry
+  directory[dir_entry_index].size = fcb->size;
 
   return 0;
 }
